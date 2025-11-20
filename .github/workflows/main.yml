@@ -2,8 +2,8 @@ name: Good News Daily
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # רץ כל יום ב-07:00 שעון ישראל
-  workflow_dispatch: {}  # הרצה ידנית
+    - cron: '0 4,5 * * *'   # תמיד 07:00 בבוקר שעון ישראל (קיץ/חורף)
+  workflow_dispatch: {}     # הרצה ידנית
 
 jobs:
   run-news-agent:
