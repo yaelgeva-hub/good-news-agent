@@ -15,5 +15,3 @@ import os
 
 # ---------------------- Configuration ----------------------
 CONFIG_FILE = "config.yml"
-
-DEFAULT_CON_
