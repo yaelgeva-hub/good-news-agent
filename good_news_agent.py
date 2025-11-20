@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Good News Agent - robust RSS fetching
-- Fetches positive stories from multiple RSS feeds
-- Silently skips inaccessible feeds but logs them
+Good News Agent - all news included, no sentiment filter
+- Fetches stories from multiple RSS and Atom feeds
 - Translates titles + summaries to Hebrew
 - Sends HTML digest via Gmail
 """
@@ -10,25 +9,23 @@ Good News Agent - robust RSS fetching
 import os
 import logging
 import traceback
-import hashlib
 import datetime
 import requests
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 import smtplib
 import re
 
+# ---------------------- Logging ----------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
+# ---------------------- CONFIG ----------------------
 CONFIG = {
-    "languages": ["en"],
-    "max_articles": 25,
-    "min_compound": 0.05,
     "summary_max_chars": 280,
+    "max_articles": 25,
     "rss_feeds": [
         "https://www.smithsonianmag.com/rss/travel",
         "https://www.smithsonianmag.com/rss/science-nature",
@@ -45,18 +42,17 @@ CONFIG = {
         "https://www.spendwithpennies.com/feed/"
     ]
 }
+CONFIG["rss_feeds"] = list(dict.fromkeys(CONFIG["rss_feeds"]))  # remove duplicates
 
-CONFIG["rss_feeds"] = list(dict.fromkeys(CONFIG["rss_feeds"]))
-
+# ---------------------- Email ----------------------
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
 if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
-    logging.warning("Email credentials not fully set. Sending email may fail.")
+    logging.warning("Email credentials not fully set in environment. Email sending may fail.")
 
-analyzer = SentimentIntensityAnalyzer()
-
+# ---------------------- Helpers ----------------------
 def clean_html_summary(html_text):
     if not html_text:
         return ""
@@ -71,28 +67,7 @@ def translate_text(text, target="he"):
     except Exception:
         return text
 
-def score_sentiment(text):
-    if not text:
-        return 0.0
-    try:
-        return analyzer.polarity_scores(text).get("compound", 0.0)
-    except Exception:
-        return 0.0
-
-def hashlib_sha1(s):
-    import hashlib
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
-
-def dedupe_articles(articles):
-    seen = set()
-    out = []
-    for a in articles:
-        key = hashlib_sha1((a.get("link") or "") + (a.get("title") or ""))
-        if key not in seen:
-            seen.add(key)
-            out.append(a)
-    return out
-
+# ---------------------- Fetch RSS ----------------------
 def fetch_rss_feed(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -114,10 +89,10 @@ def fetch_rss_feed(url):
             pub = item.pubDate.text if item.pubDate else (item.updated.text if item.find('updated') else '')
             items.append({'title': title, 'description': desc, 'link': link, 'pubDate': pub})
         return items
-    except Exception as e:
-        logging.warning("RSS fetch failed for '%s': %s", url, e)
-        return []
+    except Exception:
+        return []  # silently skip failed feeds
 
+# ---------------------- Build HTML digest ----------------------
 def build_html_digest(articles):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     parts = [
@@ -128,7 +103,7 @@ def build_html_digest(articles):
         "<div class='sections'><div class='main'>"
     ]
     if not articles:
-        parts.append("<p>לא נמצאו ידיעות מתאימות בזמן החיפוש. נסי להריץ שוב מאוחר יותר או הרחיבי את מקורות ה-RSS.</p>")
+        parts.append("<p>לא נמצאו ידיעות בזמן החיפוש. נסי להריץ שוב מאוחר יותר או הרחיבי את מקורות ה-RSS.</p>")
     else:
         for a in articles:
             title_he = translate_text(a.get("title", ""))
@@ -147,6 +122,7 @@ def build_html_digest(articles):
     parts.append("</aside></div><footer><div>נוצר על-ידי Good News Agent — מייל יומי עם חדשות טובות</div></footer></div></body></html>")
     return "\n".join(parts)
 
+# ---------------------- Send Email ----------------------
 def send_email(html):
     if not (EMAIL_USER and EMAIL_PASSWORD and EMAIL_TO):
         logging.info("Email credentials not set; skipping email send.")
@@ -169,31 +145,38 @@ def send_email(html):
         return True
     except Exception as e:
         logging.error("Failed to send email: %s", e)
-        logging.debug(traceback.format_exc())
         return False
 
+# ---------------------- Main ----------------------
 def run():
     logging.info("Good News Agent starting")
     collected = []
-    for url in CONFIG["rss_feeds"]:
-        items = fetch_rss_feed(url)
-        if not items:
-            logging.info("Skipped feed (empty or inaccessible): %s", url)
-            continue
-        for it in items:
-            text_for_sentiment = (it.get("title", "") + " " + it.get("description", ""))[:2000]
-            if score_sentiment(text_for_sentiment) >= CONFIG["min_compound"]:
+    try:
+        for url in CONFIG["rss_feeds"]:
+            items = fetch_rss_feed(url)
+            if not items:
+                continue
+            for it in items:
                 collected.append(it)
+                if len(collected) >= CONFIG["max_articles"]:
+                    break
             if len(collected) >= CONFIG["max_articles"]:
                 break
-        if len(collected) >= CONFIG["max_articles"]:
-            break
-
-    collected = dedupe_articles(collected)
-    html = build_html_digest(collected)
-    with open("good_news_digest.html", "w", encoding="utf-8") as f:
-        f.write(html)
-    send_email(html)
+        html = build_html_digest(collected)
+        with open("good_news_digest.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        send_email(html)
+    except Exception as e:
+        logging.error("Unhandled exception: %s", e)
+        logging.debug(traceback.format_exc())
+        err_html = f"<html><body><h3>Good News Agent - Error</h3><pre>{str(e)}\n\n{traceback.format_exc()}</pre></body></html>"
+        with open("good_news_digest_error.html", "w", encoding="utf-8") as f:
+            f.write(err_html)
+        if EMAIL_USER and EMAIL_PASSWORD and EMAIL_TO:
+            try:
+                send_email(err_html)
+            except Exception:
+                logging.debug("Failed to send error email")
     logging.info("Good News Agent finished")
 
 if __name__ == "__main__":
