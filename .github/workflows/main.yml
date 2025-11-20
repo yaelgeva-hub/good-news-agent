@@ -1,0 +1,31 @@
+name: Good News Daily
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # רץ כל יום ב-07:00 שעון ישראל
+  workflow_dispatch: {}  # הרצה ידנית
+
+jobs:
+  run-news-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests python-dateutil pyyaml beautifulsoup4 deep-translator vaderSentiment
+
+      - name: Run the news agent
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          python3 good_news_agent.py
