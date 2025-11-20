@@ -2,28 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-Good News Agent - full version
-- Searches Google News RSS for positive / uplifting stories in multiple categories & languages
+Good News Agent - Final corrected version
+- Searches Google News RSS for uplifting stories in several categories & languages
 - Translates titles + short summaries to Hebrew
 - Sends an HTML digest (links + Hebrew summaries) via Gmail
-- Designed to be run in GitHub Actions (uses EMAIL_USER / EMAIL_PASSWORD / EMAIL_TO secrets)
+- Designed to run in GitHub Actions (uses EMAIL_USER / EMAIL_PASSWORD / EMAIL_TO secrets)
 """
 
 import os
 import logging
 import traceback
 import hashlib
-import datetime
+import datetime as dt
+import time
+import re
+
 import requests
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 import smtplib
-import time
-import re
 
 # ---------------------- Logging ----------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -31,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 # ---------------------- CONFIG ----------------------
 CONFIG = {
     "queries": {
-        # בעלי חיים — רק סיפורים מיוחדים/חיוביים, ללא חילוצים/שיקום
+        # בעלי חיים — סיפורים מיוחדים/חיוביים
         "animals": [
             "rare animal birth",
             "rare animal discovery",
@@ -39,10 +41,9 @@ CONFIG = {
             "unique animal behavior",
             "animal friendship unusual",
             "rare species sighting",
-            "new species discovered"
+            "new species discovered",
         ],
-
-        # תיירות — מקומות מיוחדים, מלונות ובתי אירוח ייחודיים, אטרקציות
+        # תיירות — מקומות מיוחדים, מלונות ובתי אירוח
         "tourism": [
             "unique tourist destination",
             "new hotel opened",
@@ -52,10 +53,9 @@ CONFIG = {
             "rare village tourism",
             "new museum opens",
             "unique travel experience",
-            "world heritage restored"
+            "world heritage restored",
         ],
-
-        # טבע (לא חילוצים / לא ניקויים) — תופעות טבע, נופים, צמחים נדירים
+        # טבע — נופים, צמחים נדירים, תופעות טבע
         "nature": [
             "rare natural phenomenon",
             "unique landscape discovered",
@@ -63,41 +63,38 @@ CONFIG = {
             "new national park area",
             "beautiful natural site",
             "unique geological formation",
-            "stunning natural view"
+            "stunning natural view",
         ],
-
-        # מדע — חדשות חיוביות ומרגשות
+        # מדע
         "science": [
             "positive scientific discovery",
             "new medical breakthrough hope",
             "technology improves life",
             "new space discovery exciting",
-            "archaeological discovery rare"
+            "archaeological discovery rare",
         ],
-
-        # תרבות — תערוכות, מוזיאונים, פריטים נדירים ושימור
+        # תרבות
         "culture": [
             "ancient artifact discovered",
             "new museum opens",
             "unique art exhibition",
             "historic site restored",
-            "rare cultural discovery"
+            "rare cultural discovery",
         ],
-
-        # השראה — סיפורים מעוררי השראה (ללא חילוצים)
+        # השראה
         "inspiration": [
             "heartwarming story",
             "community success story",
             "inspiring achievement",
             "uplifting news",
-            "good news story"
+            "good news story",
         ],
     },
-    "languages": ["en", "es", "fr", "de", "pt", "ar"],  # שפות לחיפוש
+    "languages": ["en", "es", "fr", "de", "pt", "ar"],
     "max_articles": 25,
-    "min_compound": 0.05,  # יותר נדיב, יכלול יותר ידיעות חיוביות
+    "min_compound": 0.05,
     "rss_timeout": 10,
-    "summary_max_chars": 280  # תקציר בעברית מקסימום תווים
+    "summary_max_chars": 300,
 }
 
 # ---------------------- Email configuration (from environment / GitHub Secrets) ----------------------
@@ -108,32 +105,30 @@ EMAIL_TO = os.getenv("EMAIL_TO")
 if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
     logging.warning("Email credentials not fully set in environment. Email sending will be skipped or fail if run.")
 
-# ---------------------- Helpers ----------------------
+# ---------------------- Helpers & NLP ----------------------
 analyzer = SentimentIntensityAnalyzer()
 
+
 def clean_html_summary(html_text):
-    """Strip HTML tags and decode entities, produce a short plaintext summary."""
+    """Strip HTML tags and normalize text."""
     if not html_text:
         return ""
-    # Remove tags
     text = BeautifulSoup(html_text, "html.parser").get_text(separator=" ", strip=True)
-    # Normalize whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+
 def translate_text(text, target="he"):
-    """Translate text to target language (default Hebrew). Falls back to original on error."""
     if not text:
         return ""
     try:
-        # Note: GoogleTranslator.auto-detects source
         return GoogleTranslator(source='auto', target=target).translate(text)
     except Exception as e:
-        logging.debug("Translation failed (%s). Returning original.", e)
+        logging.debug(f"Translation to {target} failed: {e}")
         return text
 
-def translate_to_en(text):
-    """Translate to English (for sentiment scoring)."""
+
+def translate_to_en_safe(text):
     if not text:
         return ""
     try:
@@ -141,16 +136,22 @@ def translate_to_en(text):
     except Exception:
         return text
 
+
 def score_sentiment(text):
-    """Return compound sentiment score using VADER (expects English or close)."""
     if not text:
         return 0.0
     try:
         scores = analyzer.polarity_scores(text)
         return scores.get("compound", 0.0)
     except Exception as e:
-        logging.debug("VADER scoring failed: %s", e)
+        logging.debug(f"VADER scoring failed: {e}")
         return 0.0
+
+
+def hashlib_sha1(s):
+    import hashlib
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
 
 def dedupe_articles(articles):
     seen = set()
@@ -164,13 +165,9 @@ def dedupe_articles(articles):
         out.append(a)
     return out
 
-def hashlib_sha1(s):
-    import hashlib
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
-# ---------------------- Fetching Google News RSS ----------------------
+# ---------------------- Fetch Google News RSS ----------------------
 def fetch_google_news_rss(query, lang):
-    """Fetch Google News RSS search results for a given query and language (hl param)."""
     try:
         q = requests.utils.quote(query)
         url = f"https://news.google.com/rss/search?q={q}&hl={lang}&gl=US&ceid=US:{lang}"
@@ -184,52 +181,83 @@ def fetch_google_news_rss(query, lang):
             desc = item.description.text if item.description else ""
             link = item.link.text if item.link else ""
             pub = item.pubDate.text if item.pubDate else ""
-            items.append({
-                "title": title,
-                "description": desc,
-                "link": link,
-                "pubDate": pub,
-                "lang": lang
-            })
+            items.append({"title": title, "description": desc, "link": link, "pubDate": pub, "lang": lang})
         return items
     except Exception as e:
-        logging.warning("RSS fetch failed for '%s' lang '%s': %s", query, lang, e)
+        logging.warning(f"RSS fetch failed for '{query}' lang '{lang}': {e}")
         return []
 
-# ---------------------- Build digest HTML ----------------------
+
+# ---------------------- Build HTML digest (modern magazine style) ----------------------
 def build_html_digest(articles):
-    now = datetime.datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     parts = [
         "<!doctype html>",
-        "<html><head><meta charset='utf-8'><style>",
-        "body{font-family:Arial;direction:rtl;color:#111}",
-        ".article{margin-bottom:18px;padding-bottom:10px;border-bottom:1px solid #eee}",
-        ".title{font-weight:700;font-size:16px;margin-bottom:6px}",
-        ".meta{font-size:12px;color:#666;margin-bottom:6px}",
-        ".summary{font-size:14px;margin-bottom:6px}",
-        "a{color:#0b62d1;text-decoration:none}",
-        "</style></head><body>",
-        f"<h2>דוח חדשות טובות — {now}</h2>"
+        "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
+        "<style>",
+        "body{font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background:#f7f7f7; color:#111; direction:rtl; margin:0; padding:20px}",
+        ".container{max-width:900px;margin:0 auto;background:#ffffff;padding:28px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.08)}",
+        "header{border-bottom:1px solid #eee;padding-bottom:14px;margin-bottom:18px}",
+        "h1{font-size:28px;margin:0;text-align:center;color:#222;font-weight:700}",
+        ".lead{font-size:14px;color:#666;text-align:center;margin-top:6px}",
+        ".sections{display:grid;grid-template-columns:1fr 320px;grid-gap:20px}",
+        ".main{padding-right:6px}",
+        ".aside{background:#fafafa;padding:12px;border-radius:6px;border:1px solid #f0f0f0}",
+        ".article{margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #eee}",
+        ".title{font-size:18px;color:#0b3d91;margin:0 0 6px 0;font-weight:700}",
+        ".meta{font-size:12px;color:#777;margin-bottom:6px}",
+        ".summary{font-size:14px;color:#222;line-height:1.6;text-align:justify}",
+        "a{color:#0b3d91;text-decoration:none;border-bottom:1px dotted rgba(11,61,145,0.15)}",
+        "a:hover{text-decoration:underline}",
+        "footer{margin-top:20px;padding-top:12px;border-top:1px solid #eee;font-size:12px;color:#666;text-align:center}",
+        "@media (max-width:720px){.sections{grid-template-columns:1fr} .aside{order:2}}",
+        "</style>",
+        "</head><body>",
+        "<div class='container'>",
+        "<header>",
+        f"<h1>Good News Digest</h1>",
+        f"<div class='lead'>עדכון — {now} | חדשות טובות מהעולם בתרגום לעברית</div>",
+        "</header>",
+        "<div class='sections'>",
+        "<div class='main'>",
     ]
+
     if not articles:
-        parts.append("<p>לא נמצאו ידיעות שמתאימות לקריטריונים בזמן החיפוש. נסי להריץ שוב או הרחיבי את מילות החיפוש.</p>")
+        parts.append("<p>לא נמצאו ידיעות מתאימות בזמן החיפוש. נסי להריץ שוב מאוחר יותר או הרחיבי את מילות החיפוש.</p>")
     else:
         for a in articles:
-            title = a.get("title_he") or a.get("title") or ""
+            title = a.get("title_he") or a.get("title") or "(ללא כותרת)"
             summary = a.get("summary_he") or a.get("summary") or ""
             link = a.get("link") or "#"
             pub = a.get("pubDate") or ""
-            parts.append("<div class='article'>")
-            parts.append(f"<div class='title'><a href='{link}' target='_blank'>{title}</a></div>")
-            if pub:
-                parts.append(f"<div class='meta'>{pub}</div>")
-            if summary:
-                parts.append(f"<div class='summary'>{summary}</div>")
-            parts.append("</div>")
-    parts.append("</body></html>")
+            parts.extend([
+                "<article class='article'>",
+                f"<div class='title'><a href='{link}' target='_blank' rel='noopener noreferrer'>{title}</a></div>",
+                f"<div class='meta'>{pub}</div>" if pub else "",
+                f"<div class='summary'>{summary}</div>" if summary else "",
+                "</article>",
+            ])
+
+    # aside with quick stats
+    parts.extend([
+        "</div>",
+        "<aside class='aside'>",
+        f"<h3 style='margin-top:0'>סקירה מהירה</h3>",
+        f"<p>מספר ידיעות שנאספו: {len(articles)}</p>",
+        "<p>קטלוג: " + ", ".join(CONFIG['queries'].keys()) + "</p>",
+        "</aside>",
+        "</div>",
+        "<footer>",
+        "<div>נוצר על-ידי Good News Agent — מייל יומי עם חדשות טובות</div>",
+        "</footer>",
+        "</div>",
+        "</body></html>",
+    ])
+
     return "\n".join(parts)
 
-# ---------------------- Email sending (Gmail) ----------------------
+
+# ---------------------- Email send ----------------------
 def send_email(html):
     if not (EMAIL_USER and EMAIL_PASSWORD and EMAIL_TO):
         logging.info("Email credentials not set; skipping email send.")
@@ -256,6 +284,7 @@ def send_email(html):
         logging.error("Failed to send email: %s", e)
         logging.debug(traceback.format_exc())
         return False
+
 
 # ---------------------- Main routine ----------------------
 def run():
@@ -298,7 +327,7 @@ def run():
                             "pubDate": pub,
                             "score": score,
                             "title_he": title_he,
-                            "summary_he": summary_he
+                            "summary_he": summary_he,
                         })
                         logging.info("Collected (%s) score=%.3f title=%s", topic, score, title[:80])
                         if len(collected) >= CONFIG["max_articles"]:
@@ -328,7 +357,7 @@ def run():
         logging.error("Unhandled exception: %s", e)
         logging.debug(traceback.format_exc())
         # create error artifact
-        err_html = f"<html><body><h3>Good News Agent - Error</h3><pre>{str(e)}\n\n{traceback.format_exc()}</pre></body></html>"
+        err_html = f"<html><body><h3>Good News Agent - Error</h3><pre>{str(e)}\\n\\n{traceback.format_exc()}</pre></body></html>"
         with open("good_news_digest_error.html", "w", encoding="utf-8") as f:
             f.write(err_html)
         if EMAIL_USER and EMAIL_PASSWORD and EMAIL_TO:
@@ -339,14 +368,6 @@ def run():
 
     logging.info("Good News Agent finished")
 
-# ---------------------- Small helpers used above ----------------------
-def translate_to_en_safe(text):
-    if not text:
-        return ""
-    try:
-        return GoogleTranslator(source='auto', target='en').translate(text)
-    except Exception:
-        return text
 
 # ---------------------- Entry point ----------------------
 if __name__ == "__main__":
